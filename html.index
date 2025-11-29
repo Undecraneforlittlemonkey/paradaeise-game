@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Parad'Aiese - BDE Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #70c5ce;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: none;
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+            /* Important pour éviter le flou sur certains écrans */
+            image-rendering: pixelated; 
+        }
+        #scoreBox {
+            position: absolute;
+            top: 10%;
+            width: 100%;
+            text-align: center;
+            font-size: 60px;
+            color: white;
+            font-weight: bold;
+            text-shadow: 4px 4px 0 #000;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #startScreen, #gameOverScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 20px;
+            border: 5px solid #000;
+            display: none;
+            width: 85%;
+            max-width: 350px;
+            box-shadow: 10px 10px 0px rgba(0,0,0,0.5);
+        }
+        button {
+            background: #ff69b4;
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            font-size: 24px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: bold;
+            border: 3px solid black;
+            box-shadow: 4px 4px 0px #000;
+            margin-top: 15px;
+        }
+        button:active {
+            transform: translate(2px, 2px);
+            box-shadow: 1px 1px 0px #000;
+        }
+        h1 { margin-top: 0; font-size: 36px; color: #ff69b4; text-shadow: 2px 2px 0 #000; -webkit-text-stroke: 1.5px black; }
+        p { font-size: 20px; font-weight: bold;}
+    </style>
+</head>
+<body>
+
+    <div id="scoreBox">0</div>
+
+    <div id="startScreen" style="display: block;">
+        <h1>PARADAEISE<br>FLAPPY</h1>
+        <p>Mode GÉANT !<br>Tape pour voler.</p>
+        <button onclick="startGame()">GO !</button>
+    </div>
+
+    <div id="gameOverScreen">
+        <h1>PERDU !</h1>
+        <p>Score: <span id="finalScore">0</span></p>
+        <p>Meilleur: <span id="bestScore">0</span></p>
+        <p style="font-size: 14px; color: #333;">Screen ton score pour le stand !</p>
+        <button onclick="resetGame()">REJOUER</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d", { alpha: false }); // Optimisation : alpha false si le fond est opaque
+        
+        // --- NOUVEAU SYSTEME DE CACHE POUR LE FOND ---
+        // On crée un canvas "invisible" en mémoire
+        const bgCanvasCache = document.createElement('canvas');
+        const bgCtxCache = bgCanvasCache.getContext('2d');
+        let bgLoaded = false;
+
+        const birdImg = new Image(); birdImg.src = 'bird.png';
+        const bgImg = new Image(); 
+        bgImg.src = 'bg.png';
+        
+        // Quand l'image de fond est chargée, on prépare le cache
+        bgImg.onload = function() {
+            bgLoaded = true;
+            prepareBackgroundCache();
+            draw(); // Redessiner une fois prêt
+        };
+        // ---------------------------------------------
+
+        // --- REGLAGES MODE GEANT ---
+        let frames = 0;
+        let score = 0;
+        let gamePlaying = false;
+        
+        let gravity = 0.18; 
+        let speed = 3.0;    
+        let jumpStrength = 4.8; 
+
+        // Espace ÉNORME pour laisser passer le gros ange
+        let pipeGap = 290; 
+        let pipeSpawnRate = 100; 
+
+        function resize() {
+            // On limite la résolution interne pour les écrans très haute densité (Retina, etc.)
+            // Cela améliore énormément les perfs sur les nouveaux iPhone/Samsung
+            const scaleFactor = window.devicePixelRatio > 1.5 ? 1.5 : window.devicePixelRatio; // On plafonne un peu la qualité max
+            
+            canvas.width = Math.min(window.innerWidth, 500) * scaleFactor;
+            canvas.height = window.innerHeight * scaleFactor;
+
+            // On force l'affichage CSS pour qu'il prenne tout l'écran
+            canvas.style.width = Math.min(window.innerWidth, 500) + "px";
+            canvas.style.height = window.innerHeight + "px";
+
+            // Important : on remet l'échelle du contexte
+            ctx.scale(scaleFactor, scaleFactor);
+
+            // Si on redimensionne, il faut refaire le cache du fond
+            if (bgLoaded) prepareBackgroundCache();
+        }
+
+        // --- NOUVELLE FONCTION : PRÉPARE LE FOND ---
+        function prepareBackgroundCache() {
+            // Le canvas invisible prend la taille exacte nécessaire
+            bgCanvasCache.width = canvas.width;
+            bgCanvasCache.height = canvas.height;
+            
+            // On dessine l'image UNE SEULE FOIS sur le canvas invisible, déjà étirée
+            bgCtxCache.drawImage(bgImg, 0, 0, bgCanvasCache.width, bgCanvasCache.height);
+        }
+        // -------------------------------------------
+
+        window.addEventListener('resize', resize);
+        // Appel initial de resize
+        resize();
+
+
+        const bird = {
+            x: 50,
+            y: 150,
+            w: 85, 
+            h: 85, 
+            velocity: 0,
+            rotation: 0,
+            
+            draw: function() {
+                ctx.save();
+                ctx.translate(this.x + this.w/2, this.y + this.h/2);
+                
+                let targetRotation = this.velocity * 0.1;
+                this.rotation += (targetRotation - this.rotation) * 0.5;
+                ctx.rotate(this.rotation);
+
+                if (birdImg.complete && birdImg.naturalHeight !== 0) {
+                    ctx.drawImage(birdImg, -this.w/2, -this.h/2, this.w, this.h);
+                } else {
+                    ctx.fillStyle = "#ff69b4";
+                    ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+                }
+                ctx.restore();
+            },
+            
+            update: function() {
+                this.velocity += gravity;
+                this.y += this.velocity;
+
+                // Utilisation de la hauteur CSS pour la physique
+                const displayHeight = parseFloat(canvas.style.height);
+
+                if (this.y + this.h >= displayHeight - 20) {
+                    this.y = displayHeight - 20 - this.h;
+                    gameOver();
+                }
+                if (this.y < 0) {
+                    this.y = 0;
+                    this.velocity = 0;
+                }
+            },
+            
+            flap: function() {
+                this.velocity = -jumpStrength;
+            }
+        };
+
+        const pipes = {
+            position: [],
+            w: 80, 
+
+            draw: function() {
+                const displayHeight = parseFloat(canvas.style.height);
+                for (let i = 0; i < this.position.length; i++) {
+                    let p = this.position[i];
+                    let topY = p.y;
+                    let bottomY = p.y + pipeGap;
+
+                    ctx.fillStyle = "#74BF2E"; 
+                    ctx.strokeStyle = "#000"; 
+                    ctx.lineWidth = 3;
+
+                    // Tuyau HAUT
+                    ctx.fillRect(p.x, 0, this.w, topY);
+                    ctx.strokeRect(p.x, -2, this.w, topY + 2);
+                    
+                    // Bouchon HAUT
+                    ctx.fillStyle = "#558C22"; 
+                    ctx.fillRect(p.x - 5, topY - 25, this.w + 10, 25);
+                    ctx.strokeRect(p.x - 5, topY - 25, this.w + 10, 25);
+
+                    // Tuyau BAS
+                    ctx.fillStyle = "#74BF2E";
+                    ctx.fillRect(p.x, bottomY, this.w, displayHeight - bottomY);
+                    ctx.strokeRect(p.x, bottomY, this.w, displayHeight - bottomY);
+
+                    // Bouchon BAS
+                    ctx.fillStyle = "#558C22";
+                    ctx.fillRect(p.x - 5, bottomY, this.w + 10, 25);
+                    ctx.strokeRect(p.x - 5, bottomY, this.w + 10, 25);
+                }
+            },
+            
+            update: function() {
+                if (frames % pipeSpawnRate === 0) {
+                    const displayHeight = parseFloat(canvas.style.height);
+                    const minHeight = 40;
+                    const maxHeight = displayHeight - pipeGap - minHeight - 60;
+                    let safeMax = Math.max(minHeight, maxHeight);
+
+                    this.h = Math.floor(Math.random() * (safeMax - minHeight + 1) + minHeight);
+                    
+                    this.position.push({
+                        x: parseFloat(canvas.style.width),
+                        y: this.h
+                    });
+                }
+
+                for (let i = 0; i < this.position.length; i++) {
+                    let p = this.position[i];
+                    p.x -= speed;
+
+                    let tolerance = 15; 
+                    let bottomPipeY = p.y + pipeGap;
+                    
+                    if (
+                        bird.x + bird.w - tolerance > p.x && 
+                        bird.x + tolerance < p.x + this.w && 
+                        (bird.y + tolerance < p.y || bird.y + bird.h - tolerance > bottomPipeY)
+                    ) {
+                        gameOver();
+                    }
+
+                    if (p.x + this.w < bird.x && !p.passed) {
+                        score++;
+                        document.getElementById("scoreBox").innerText = score;
+                        p.passed = true;
+                    }
+
+                    if (p.x + this.w <= -100) {
+                        this.position.shift();
+                        i--;
+                    }
+                }
+            },
+            reset: function() { this.position = []; }
+        };
+
+        function draw() {
+            // --- MODIFICATION ICI : ON UTILISE LE CACHE ---
+            if (bgLoaded) {
+                // Au lieu de dessiner l'image brute, on copie le canvas invisible
+                // C'est BEAUCOUP plus rapide car l'image est déjà redimensionnée
+                ctx.drawImage(bgCanvasCache, 0, 0, canvas.width, canvas.height, 0, 0, parseFloat(canvas.style.width), parseFloat(canvas.style.height));
+            } else {
+                ctx.fillStyle = "#70c5ce";
+                ctx.fillRect(0, 0, parseFloat(canvas.style.width), parseFloat(canvas.style.height));
+            }
+            // ----------------------------------------------
+
+            pipes.draw();
+            bird.draw();
+            
+            const displayHeight = parseFloat(canvas.style.height);
+            const displayWidth = parseFloat(canvas.style.width);
+
+            ctx.fillStyle = "#e1c699";
+            ctx.fillRect(0, displayHeight - 20, displayWidth, 20);
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, displayHeight - 20);
+            ctx.lineTo(displayWidth, displayHeight - 20);
+            ctx.stroke();
+        }
+
+        function update() { bird.update(); pipes.update(); }
+
+        function loop() {
+            if (!gamePlaying) return;
+            update();
+            draw();
+            frames++;
+            requestAnimationFrame(loop);
+        }
+
+        function startGame() {
+            document.getElementById("startScreen").style.display = "none";
+            document.getElementById("gameOverScreen").style.display = "none";
+            bird.y = parseFloat(canvas.style.height) / 2;
+            bird.velocity = 0;
+            pipes.reset();
+            score = 0;
+            frames = 0;
+            document.getElementById("scoreBox").innerText = "0";
+            gamePlaying = true;
+            loop();
+        }
+
+        function resetGame() { startGame(); }
+        function gameOver() {
+            gamePlaying = false;
+            let best = localStorage.getItem('bde_paradise_best') || 0;
+            if (score > best) { best = score; localStorage.setItem('bde_paradise_best', best); }
+            document.getElementById("finalScore").innerText = score;
+            document.getElementById("bestScore").innerText = best;
+            document.getElementById("gameOverScreen").style.display = "block";
+        }
+
+        function jump(e) {
+            if (e.cancelable && e.type === 'touchstart') e.preventDefault();
+            if(gamePlaying) bird.flap();
+        }
+
+        canvas.addEventListener("mousedown", jump);
+        canvas.addEventListener("touchstart", jump, {passive: false});
+        window.addEventListener('keydown', function(e){
+            if(e.code === 'Space') jump(e);
+        });
+
+        // On attend que l'image charge pour le premier dessin
+        // Le onload s'en chargera
+
+    </script>
+</body>
+</html>
